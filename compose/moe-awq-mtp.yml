@@ -1,0 +1,138 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-35B-A3B MoE (cyankiwi AWQ-INT4, ~23 GB)
+#   Topology:  Dual 3090 PCIe (TP=2, no NVLink)
+#   Drafter:   MTP n=3 (multi-token prediction speculative decoding)
+#   KV:        fp16 (fp8_e5m2 rejected by compressed-tensors MoE path;
+#              fp8_e4m3 boots but MTP draft acceptance drops to 0%)
+#   Vision:    yes
+#   Max ctx:   200K
+#   Genesis:   none
+#   Status:    🧪 Experimental
+#   Best for:  Peak MoE TPS with MTP-3 (~179/264/200 TPS narr/code/explain)
+# ---------------------------------------------------------------------------
+# Self-contained compose — all paths relative to docker/ root.
+# Expected TPS: ~179 narr / 264 code @ 200K ctx on 2x RTX 3090 PCIe.
+#
+# Based on tfriedel/qwen3.6-rtx3090-lab docker-compose.35b-a3b-awq-mtp.yml.
+# Key insight: MTP + --no-enable-prefix-caching gives +20-77% over baseline.
+# Tradeoff: prefix caching is OFF, so repeated-prompt sessions lose cache hit.
+#
+# Prerequisites:
+#   1. Edit .env (copy from .env.example)
+#   2. bash scripts/download.sh --moe-awq
+#   3. docker compose --env-file .env -f compose/moe-awq-mtp.yml up -d
+# ===========================================================================
+
+services:
+  vllm-qwen36-35b-a3b-mtp:
+    image: ${MOE_AWQ_IMAGE:-vllm/vllm-openai:nightly-aa2b56ffb0c1d8b29d6468282a49d9b4a9f0dd1c}
+    container_name: "${MOE_AWQ_CONTAINER:-vllm-qwen36-35b-a3b-mtp}"
+    restart: "no"
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${MOE_AWQ_PORT:-11436}:8000"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      # --- Model weights ---
+      - ../models:/root/.cache/huggingface
+      # --- JIT compile caches ---
+      - ../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../cache/triton:/root/.triton/cache
+      # --- Patches ---
+      # cudagraph tolist fix (needed for TurboQuant KV path; harmless otherwise)
+      - ../patches/tolist-cudagraph/patch_tolist_cudagraph.py:/patches/patch_tolist_cudagraph.py:ro
+      # Fixed chat template (7 bug fixes)
+      - ../patches/chat-template/chat_template.jinja:/patches/templates/qwen3.6-enhanced.jinja:ro
+      # NVLink auto-detection
+      - ../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPUS:-all}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=true
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - NCCL_IB_DISABLE=1
+      - VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1
+      - VLLM_NO_USAGE_STATS=1
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+      - VLLM_FLOAT32_MATMUL_PRECISION=high
+      - OMP_NUM_THREADS=1
+      - CUDA_DEVICE_MAX_CONNECTIONS=8
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - VLLM_MARLIN_USE_ATOMIC_ADD=1
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        pip install xxhash -q 2>/dev/null
+        python3 /patches/patch_tolist_cudagraph.py
+        pip install pytest -q 2>/dev/null
+        # NVLink auto-detection
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@"
+        else
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@"
+        fi
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/qwen3.6-35b-a3b-awq-int4
+      - --served-model-name
+      - "${MOE_AWQ_MODEL_ALIAS:-qwen3.6-35b-a3b-awq}"
+      - --quantization
+      - compressed-tensors
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      - --max-model-len
+      - "${MOE_AWQ_CTX:-200000}"
+      - --gpu-memory-utilization
+      - "${MOE_AWQ_GPU_UTIL:-0.95}"
+      - --max-num-seqs
+      - "1"
+      # Bumped to 4096 — MTP needs more slots to schedule draft tokens
+      - --max-num-batched-tokens
+      - "4096"
+      - --trust-remote-code
+      - --chat-template
+      - /patches/templates/qwen3.6-enhanced.jinja
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": false}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      # MTP-3 + no-prefix-caching — the matched-flag combo for peak TPS
+      # k=3 is the cross-prompt sweet spot:
+      #   k=1: +8/+19/+11 % (narrative/code/explain)
+      #   k=2: +22/+54/+28 %
+      #   k=3: +20/+77/+34 %  ← chosen — best aggregate
+      #   k=4: +15/+85/+27 %  (narrative regresses, code keeps gaining)
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":${MOE_AWQ_MTP_TOKENS:-3}}'
+      - --no-enable-prefix-caching
+      - --enable-chunked-prefill
+      - --kv-cache-dtype
+      - int8_per_token_head
+      - --override-generation-config
+      - '{"temperature":${TEMP:-0.6},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

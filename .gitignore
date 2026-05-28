@@ -1,0 +1,8 @@
+# Model weights (~17 GB)
+models/
+
+# JIT compile caches (auto-generated on first boot)
+cache/
+
+# User config (contains potentially sensitive values)
+.env

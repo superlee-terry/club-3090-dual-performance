@@ -1,0 +1,68 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-35B-A3B MoE (APEX IQK Quality GGUF, ~23.5 GB)
+#   Topology:  Dual 3090 (TP=2, no NVLink)
+#   Drafter:   none (MTP head in GGUF, testing compatibility)
+#   KV:        q8_0 (K+V, near-lossless for long context)
+#   Vision:    no
+#   Max ctx:   196K
+#   Genesis:   N/A — not a vLLM deployment
+#   Status:    🧪 Experimental
+#   Best for:  Maximum long-context MoE inference on dual 3090
+# ---------------------------------------------------------------------------
+# Self-contained compose — all paths relative to docker/ root.
+# Expected: 196K context on 2x RTX 3090 PCIe with ~10 GB VRAM headroom.
+#
+# Prerequisites:
+#   1. Edit .env (copy from .env.example)
+#   2. bash scripts/download.sh --moe
+#   3. docker compose --env-file .env -f compose/moe-llamacpp.yml up -d
+#
+# ik_llama shards MoE expert weights across TP ranks (unlike vLLM preview
+# which keeps them resident per card), enabling 196K+ context on dual 3090.
+# ===========================================================================
+
+services:
+  ik-llama-moe:
+    image: ${MOE_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp:cu12-server}
+    container_name: "${MOE_CONTAINER:-ik-llama-moe}"
+    restart: "no"
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${MOE_PORT:-11435}:8080"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ../models:/models:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPUS:-all}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - --model
+      - /models/qwen3.6-35b-a3b/apex-quality/Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8080"
+      - --split-mode
+      - graph
+      - --tensor-split
+      - "1,1"
+      - -t
+      - "8"
+      - -ngl
+      - "99"
+      - -c
+      - "${MOE_CTX:-196608}"
+      - --batch-size
+      - "${MOE_BATCH:-2048}"
+      - --ubatch-size
+      - "${MOE_UBATCH:-512}"
+      - --cache-type-k
+      - "${MOE_KV_TYPE:-q8_0}"
+      - --cache-type-v
+      - "${MOE_KV_TYPE:-q8_0}"
