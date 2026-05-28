@@ -89,8 +89,8 @@ MTP + `--no-enable-prefix-caching` 是双卡 MoE 的最佳组合。关闭 prefix
 ### 1. 下载
 
 ```bash
-git clone https://github.com/noonghunna/club-3090.git
-cd club-3090/docker
+git clone https://github.com/superlee-terry/club-3090-dual-performance.git
+cd club-3090-dual-performance
 ```
 
 ### 2. 配置
@@ -217,12 +217,23 @@ docker compose --env-file .env -f compose/moe-awq-mtp.yml up -d
 
 > **注意**：必须加 `--env-file .env`。
 
+### Docker 镜像
+
+预构建的 vLLM 镜像已推送到 Docker Hub，`docker compose up` 会自动拉取：
+
+```bash
+docker pull lee21321/vllm-openai:club-3090-performance
+```
+
+基于 `vllm/vllm-openai:nightly-aa2b56ffb0c`（v0.21.1rc1），已验证兼容 MoE AWQ + MTP + int8 KV。
+
 ## 目录结构
 
 ```
-docker/
+club-3090-dual-performance/
 ├── .env.example              # 配置模板
 ├── .env                      # 实际配置（gitignore）
+├── LICENSE                   # Apache 2.0
 ├── README.md                 # 本文件
 ├── banchmark/                # 性能基准测试记录
 ├── models/                   # 模型权重（gitignore）
