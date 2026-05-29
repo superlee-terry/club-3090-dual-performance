@@ -57,7 +57,6 @@ services:
       - ../patches/vllm-qwen36-dflash-int8/v1/core/kv_cache_utils.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_utils.py:ro
       - ../patches/vllm-qwen36-dflash-int8/v1/core/sched/scheduler.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py:ro
       - ../patches/vllm-qwen36-dflash-int8/v1/spec_decode/dflash.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/dflash.py:ro
-      - ../patches/vllm-qwen36-dflash-int8/v1/spec_decode/eagle.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/eagle.py:ro
       - ../patches/vllm-qwen36-dflash-int8/v1/spec_decode/utils.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/utils.py:ro
       - ../patches/vllm-qwen36-dflash-int8/v1/kv_cache_interface.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/kv_cache_interface.py:ro
       - ../patches/vllm-qwen36-dflash-int8/v1/worker/gpu/attn_utils.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/attn_utils.py:ro

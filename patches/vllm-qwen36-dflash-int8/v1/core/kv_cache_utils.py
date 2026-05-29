@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import os
+import regex as re
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
