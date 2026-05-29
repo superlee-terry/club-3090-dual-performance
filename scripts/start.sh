@@ -3,18 +3,20 @@
 # Manage dual-3090 deployment services.
 #
 # Usage:
-#   bash scripts/start.sh                    # start default (dflash)
-#   bash scripts/start.sh start              # same as above
-#   bash scripts/start.sh start dflash       # start vLLM DFlash
-#   bash scripts/start.sh start moe          # start llama.cpp MoE
-#   bash scripts/start.sh start moe-mtp      # start vLLM MoE AWQ + MTP-3
-#   bash scripts/start.sh stop               # stop default (dflash)
-#   bash scripts/start.sh stop dflash        # stop vLLM DFlash
-#   bash scripts/start.sh stop moe           # stop llama.cpp MoE
-#   bash scripts/start.sh stop moe-mtp       # stop vLLM MoE AWQ + MTP-3
-#   bash scripts/start.sh restart [service]  # stop then start
-#   bash scripts/start.sh status             # show all services
-#   bash scripts/start.sh logs [service]     # follow logs
+#   bash scripts/start.sh                       # start default (dflash)
+#   bash scripts/start.sh start                 # same as above
+#   bash scripts/start.sh start dflash          # start vLLM DFlash (FP16 KV, 185K ctx)
+#   bash scripts/start.sh start dflash-int8     # start vLLM DFlash + INT8 PTH KV (262K ctx)
+#   bash scripts/start.sh start moe             # start llama.cpp MoE
+#   bash scripts/start.sh start moe-mtp         # start vLLM MoE AWQ + MTP-3
+#   bash scripts/start.sh stop                  # stop default (dflash)
+#   bash scripts/start.sh stop dflash           # stop vLLM DFlash
+#   bash scripts/start.sh stop dflash-int8      # stop vLLM DFlash + INT8
+#   bash scripts/start.sh stop moe              # stop llama.cpp MoE
+#   bash scripts/start.sh stop moe-mtp          # stop vLLM MoE AWQ + MTP-3
+#   bash scripts/start.sh restart [service]     # stop then start
+#   bash scripts/start.sh status                # show all services
+#   bash scripts/start.sh logs [service]        # follow logs
 #
 set -euo pipefail
 
@@ -32,26 +34,31 @@ cd "$DOCKER_ROOT"
 # Each service: compose file, container name, port, model alias, env prefix
 declare -A SVC_COMPOSE=(
   [dflash]="compose/dflash.yml"
+  [dflash-int8]="compose/dflash-int8.yml"
   [moe]="compose/moe-llamacpp.yml"
   [moe-mtp]="compose/moe-awq-mtp.yml"
 )
 declare -A SVC_CONTAINER=(
   [dflash]="${CONTAINER_NAME:-vllm-qwen36-27b-dflash}"
+  [dflash-int8]="${DFLASH_INT8_CONTAINER:-vllm-qwen36-27b-dflash-int8}"
   [moe]="${MOE_CONTAINER:-ik-llama-moe}"
   [moe-mtp]="${MOE_AWQ_CONTAINER:-vllm-qwen36-35b-a3b-mtp}"
 )
 declare -A SVC_PORT=(
   [dflash]="${PORT:-11434}"
+  [dflash-int8]="${DFLASH_INT8_PORT:-11434}"
   [moe]="${MOE_PORT:-11435}"
   [moe-mtp]="${MOE_AWQ_PORT:-11436}"
 )
 declare -A SVC_MODEL=(
   [dflash]="${MODEL_ALIAS:-qwen3.6-27b-autoround}"
+  [dflash-int8]="${MODEL_ALIAS:-qwen3.6-27b-autoround}"
   [moe]="${MOE_CONTAINER:-ik-llama-moe}"
   [moe-mtp]="${MOE_AWQ_MODEL_ALIAS:-qwen3.6-35b-a3b-awq}"
 )
 declare -A SVC_IMAGE=(
   [dflash]="${VLLM_IMAGE:-vllm/vllm-openai:nightly}"
+  [dflash-int8]="${VLLM_IMAGE:-vllm/vllm-openai:nightly}"
   [moe]="${MOE_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp:cu13-server}"
   [moe-mtp]="${MOE_AWQ_IMAGE:-vllm/vllm-openai:nightly}"
 )
@@ -61,8 +68,8 @@ DEFAULT_SVC="dflash"
 resolve_service() {
   local svc="${1:-$DEFAULT_SVC}"
   case "$svc" in
-    dflash|moe|moe-mtp) echo "$svc" ;;
-    *) echo "ERROR: Unknown service '$svc'. Use: dflash, moe, moe-mtp" >&2; exit 1 ;;
+    dflash|dflash-int8|moe|moe-mtp) echo "$svc" ;;
+    *) echo "ERROR: Unknown service '$svc'. Use: dflash, dflash-int8, moe, moe-mtp" >&2; exit 1 ;;
   esac
 }
 
@@ -75,7 +82,7 @@ service_url() {
 
 do_status() {
   echo "=== Service Status ==="
-  for svc in dflash moe moe-mtp; do
+  for svc in dflash dflash-int8 moe moe-mtp; do
     local container="${SVC_CONTAINER[$svc]}"
     local url="$(service_url "$svc")"
     local model="${SVC_MODEL[$svc]}"
@@ -138,7 +145,7 @@ do_start() {
   echo "  .env OK"
 
   # 2. Check model weights (service-specific)
-  if [ "$svc" = "dflash" ]; then
+  if [ "$svc" = "dflash" ] || [ "$svc" = "dflash-int8" ]; then
     local main_dir="${MODEL_DIR:-./models}/qwen3.6-27b/autoround-int4"
     local dflash_dir="${MODEL_DIR:-./models}/qwen3.6-27b/dflash"
     if [ ! -f "$main_dir/config.json" ] || [ "$(ls "$main_dir"/*.safetensors 2>/dev/null | wc -l)" -eq 0 ]; then
@@ -151,6 +158,15 @@ do_start() {
       echo "WARNING: DFlash draft not found at $dflash_dir (TPS will be ~25 instead of ~125)"
     else
       echo "  DFlash draft OK"
+    fi
+    if [ "$svc" = "dflash-int8" ]; then
+      local overlay_dir="./patches/vllm-qwen36-dflash-int8"
+      if [ ! -d "$overlay_dir" ]; then
+        echo "WARNING: DFlash+INT8 overlay not found at $overlay_dir"
+        echo "  The compose will fail without the 17-file vendored overlay."
+      else
+        echo "  DFlash+INT8 overlay OK"
+      fi
     fi
   elif [ "$svc" = "moe" ]; then
     local moe_file="${MODEL_DIR:-./models}/qwen3.6-35b-a3b/apex-quality/Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf"
@@ -258,16 +274,17 @@ case "$ACTION" in
     echo "Usage: bash scripts/start.sh {start|stop|restart|status|logs} [service]"
     echo ""
     echo "Commands:"
-    echo "  start [dflash|moe]    Start service with preflight check (default: dflash)"
-    echo "  stop [dflash|moe]     Stop service (default: dflash)"
-    echo "  restart [dflash|moe]  Stop then start"
-    echo "  status                Show all services"
-    echo "  logs [dflash|moe]     Follow container logs"
+    echo "  start [dflash|dflash-int8|moe|moe-mtp]  Start service with preflight check"
+    echo "  stop [dflash|dflash-int8|moe|moe-mtp]   Stop service"
+    echo "  restart [service]                        Stop then start"
+    echo "  status                                   Show all services"
+    echo "  logs [service]                           Follow container logs"
     echo ""
     echo "Services:"
-    echo "  dflash    Qwen3.6-27B vLLM DFlash (default)"
-    echo "  moe       Qwen3.6-35B-A3B llama.cpp MoE"
-    echo "  moe-mtp   Qwen3.6-35B-A3B vLLM AWQ + MTP-3"
+    echo "  dflash       Qwen3.6-27B vLLM DFlash (FP16 KV, 185K ctx) [default]"
+    echo "  dflash-int8  Qwen3.6-27B vLLM DFlash + INT8 PTH KV (262K ctx)"
+    echo "  moe          Qwen3.6-35B-A3B llama.cpp MoE"
+    echo "  moe-mtp      Qwen3.6-35B-A3B vLLM AWQ + MTP-3"
     exit 1
     ;;
 esac
