@@ -1,0 +1,155 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B (Lorbus AutoRound INT4 + BF16 mtp.fc preserved)
+#   Topology:  Dual 3090 (TP=2, NVLink auto-detected via NVLINK_MODE)
+#   Drafter:   z-lab DFlash N=5 (block-diffusion, BF16 KV in independent pool)
+#   KV:        int8_per_token_head (target) + bfloat16 (drafter — independent pools)
+#   Vision:    yes
+#   Max ctx:   262K
+#   Genesis:   none — DFlash drafter handles spec-decode independently
+#   Status:    🧪 Experimental
+#   Caveats:   Boots only with vLLM PR #42102 vendored overlay. INT8 PTH + DFlash
+#              coexistence is not upstream. Drop overlay when PR #42102 + #41703 land.
+#   Best for:  Long-context DFlash — 262K ctx with code-optimal spec-decode
+# ---------------------------------------------------------------------------
+# Self-contained compose — all paths relative to docker/ root.
+# DFlash + INT8 PTH KV long-context variant of compose/dflash.yml.
+#
+# Expected TPS: ~70-80 narr / ~110-130 code @ 262K ctx on 2x RTX 3090 PCIe.
+# (Estimates based on Gemma 4 DFlash+INT8 results: 87/146 at 262K)
+#
+# Prerequisites:
+#   1. Edit .env (copy from .env.example)
+#   2. bash scripts/download.sh   (downloads main model + DFlash draft)
+#   3. docker compose -f compose/dflash-int8.yml up -d
+#
+# Key difference from compose/dflash.yml:
+#   - KV cache: INT8 per-token-head (vs FP16 default)
+#   - Max context: 262K (vs 185K)
+#   - 17-file vendored overlay required for non-causal + quantized KV coexistence
+#   - Separate cache dirs to avoid collision with dflash.yml caches
+# ===========================================================================
+
+services:
+  vllm-qwen36-27b-dflash-int8:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:nightly-e47c98ef7a38792996e452ef53914e21e41928e9}
+    container_name: "${DFLASH_INT8_CONTAINER:-vllm-qwen36-27b-dflash-int8}"
+    restart: "no"
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${DFLASH_INT8_PORT:-8013}:8000"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      # --- Model weights ---
+      - ../models:/root/.cache/huggingface
+      # --- JIT compile caches (separate from dflash.yml) ---
+      - ../cache/torch_compile_dflash_int8:/root/.cache/vllm/torch_compile_cache
+      - ../cache/triton_dflash_int8:/root/.triton/cache
+      # --- DFlash + INT8 PTH KV overlay (17 files) ---
+      # See ../patches/vllm-qwen36-dflash-int8/README.md
+      - ../patches/vllm-qwen36-dflash-int8/config/attention.py:/usr/local/lib/python3.12/dist-packages/vllm/config/attention.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/config/speculative.py:/usr/local/lib/python3.12/dist-packages/vllm/config/speculative.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/model_executor/layers/attention/attention.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/attention/attention.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/model_executor/models/qwen3_dflash.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3_dflash.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/transformers_utils/configs/speculators/algos.py:/usr/local/lib/python3.12/dist-packages/vllm/transformers_utils/configs/speculators/algos.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/attention/backends/flash_attn.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/flash_attn.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/attention/backends/triton_attn.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/triton_attn.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/attention/selector.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/selector.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/core/kv_cache_utils.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/kv_cache_utils.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/core/sched/scheduler.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/spec_decode/dflash.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/dflash.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/spec_decode/eagle.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/eagle.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/spec_decode/utils.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/spec_decode/utils.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/kv_cache_interface.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/kv_cache_interface.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/worker/gpu/attn_utils.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/attn_utils.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/worker/gpu_model_runner.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu_model_runner.py:ro
+      - ../patches/vllm-qwen36-dflash-int8/v1/worker/kv_cache_shape_utils.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/kv_cache_shape_utils.py:ro
+      # --- Existing patches (same as dflash.yml) ---
+      # Marlin pad-sub-tile-n
+      - ../patches/vllm-marlin-pad/marlin.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/mixed_precision/marlin.py:ro
+      - ../patches/vllm-marlin-pad/MPLinearKernel.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/kernels/linear/mixed_precision/MPLinearKernel.py:ro
+      # PR #41800 truncate_prompt_tokens fix
+      - ../patches/vllm-pr41800/install.sh:/etc/club3090/install-pr41800.sh:ro
+      # Fixed chat template
+      - ../patches/chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+      # NVLink auto-detection
+      - ../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPUS:-all}
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=true
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        bash /etc/club3090/install-pr41800.sh
+        pip install pytest -q 2>/dev/null
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@"
+        else
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@"
+        fi
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/qwen3.6-27b/autoround-int4
+      - --served-model-name
+      - "${MODEL_ALIAS:-qwen3.6-27b-autoround}"
+      - --quantization
+      - auto_round
+      - --dtype
+      - bfloat16
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      # --- KV: INT8 per-token-head (Ampere-compatible) ---
+      # DFlash drafter gets BF16 KV via independent pool partitioning (PR #42102).
+      - --kv-cache-dtype
+      - "${DFLASH_INT8_KV_DTYPE:-int8_per_token_head}"
+      - --max-model-len
+      - "${DFLASH_INT8_MAX_MODEL_LEN:-262144}"
+      - --gpu-memory-utilization
+      - "${DFLASH_INT8_GPU_UTIL:-0.95}"
+      - --max-num-seqs
+      - "1"
+      - --max-num-batched-tokens
+      - "8192"
+      - --trust-remote-code
+      - --chat-template
+      - /etc/qwen-froggeric-chat-template.jinja
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": ${ENABLE_THINKING:-false}}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --speculative-config
+      - '{"method":"dflash","model":"/root/.cache/huggingface/qwen3.6-27b/dflash","num_speculative_tokens":5}'
+      - --override-generation-config
+      - '{"temperature":${TEMP:-0.6},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
