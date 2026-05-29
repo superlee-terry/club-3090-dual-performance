@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from typing import Any
 
 import torch
 from typing_extensions import override
 
-from vllm.config import VllmConfig, replace
+from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import triton
@@ -79,11 +80,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
         )
 
     @override
-    def _raise_if_multimodal(self):
-        # Override to allow multimodal inputs since DFlash supports Gemma 4 +
-        # Qwen3.5 models. Renamed from `_warn_if_multimodal` in vLLM main 2026-04
-        # (Codex rebase 2026-05-06 preserved the OLD name; this fix updates to
-        # the current name so the override actually takes effect).
+    def _warn_if_multimodal(self):
+        # Override to allow multimodal inputs since DFlash supports Qwen3.5 models
         pass
 
     @override
@@ -283,33 +281,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         per_group, per_layer = super().build_per_group_and_layer_attn_metadata(
             cad, draft_index
         )
-        sliding_layer_names: set[str] = getattr(
-            self.model, "sliding_attention_layer_names", set()
-        )
-        if sliding_layer_names:
-            # DFlash layers consume attention metadata through the per-layer
-            # forward context. Keep the base non-causal group metadata for
-            # group-level spec decode checks, and specialize only the SWA
-            # layers that need a causal sliding-window mask.
-            causal_cad = cad.replace(causal=True)
-            for attn_group in self.draft_attn_groups:
-                causal_layers = sliding_layer_names & set(attn_group.layer_names)
-                if not causal_layers:
-                    continue
-                attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
-                    common_attn_metadata=causal_cad,
-                    draft_index=draft_index,
-                )
-                for layer_name in causal_layers:
-                    per_layer[layer_name] = attn_metadata
-
         for layer_name, attn_metadata in per_layer.items():
-            if layer_name in sliding_layer_names:
-                assert getattr(attn_metadata, "causal", None) is True, (
-                    f"Attention metadata for sliding layer {layer_name} does not have"
-                    " causal support, which is required for DFlash SWA."
-                )
-                continue
             assert getattr(attn_metadata, "causal", None) is False, (
                 f"Attention metadata for layer {layer_name} does not have"
                 " non-causal support, which is required for DFlash."
