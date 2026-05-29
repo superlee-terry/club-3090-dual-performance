@@ -599,7 +599,7 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             key_cache, value_cache = kv_cache.unbind(1)
             if (
-                is_quantized_kv_cache(self.kv_cache_dtype)
+                isinstance(self.kv_cache_dtype, str) and is_quantized_kv_cache(self.kv_cache_dtype)
                 and key_cache.dtype != self.fp8_dtype
             ):
                 key_cache = key_cache.view(self.fp8_dtype)
@@ -691,7 +691,7 @@ class TritonAttentionImpl(AttentionImpl):
             layer: The attention layer
         """
         # Quantized KV cache is not supported for encoder attention.
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if isinstance(self.kv_cache_dtype, str) and is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantized KV cache is not supported for encoder attention"
             )
@@ -748,7 +748,7 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # For decoder and cross-attention, use KV cache as before.
         key_cache, value_cache = kv_cache.unbind(1)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if isinstance(self.kv_cache_dtype, str) and is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
         triton_reshape_and_cache_flash(
@@ -782,7 +782,7 @@ class TritonAttentionImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.unbind(1)
         flash_layout = True
 
-        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
+        is_fp8_kv_cache = isinstance(self.kv_cache_dtype, str) and is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)

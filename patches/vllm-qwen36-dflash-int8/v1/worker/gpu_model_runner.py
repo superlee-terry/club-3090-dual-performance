@@ -1082,9 +1082,26 @@ class GPUModelRunner(
         Delegates to KVBlockZeroer.init_meta with the runner's state.
         Called from gpu_worker.py outside the CuMem pool context.
         """
+        from vllm.v1.core.kv_cache_utils import _get_dflash_isolated_group_ids
+        # PR #42102: exclude drafter groups — they have independent KV pools
+        # with different page sizes, which would trigger the zeroer's
+        # uniform-page-size assertion.
+        isolated_ids: set[int] = set()
+        if self.speculative_config and self.speculative_config.use_dflash():
+            isolated_ids = _get_dflash_isolated_group_ids(
+                self.vllm_config,
+                self.kv_cache_config.kv_cache_groups,
+            )
+
+        def _shared_attn_groups():
+            for kv_gid, attn_groups in enumerate(self.attn_groups):
+                if kv_gid in isolated_ids:
+                    continue
+                yield from attn_groups
+
         self._kv_block_zeroer = KVBlockZeroer(self.device, self.pin_memory)
         self._kv_block_zeroer.init_meta(
-            attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
+            attn_groups_iter=_shared_attn_groups(),
             kernel_block_sizes=self._kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,

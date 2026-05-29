@@ -449,8 +449,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # DFlash drafter layers have kv_cache_dtype="auto" (BF16) set by
             # qwen3_dflash.py even when global config is INT8 PTH. Using the
             # per-spec value ensures the scheduler picks the right qkv_dtype.
+            # When kv_cache_spec.dtype is a torch.dtype (not a string),
+            # it's already a concrete type — never quantized.
             cache_dtype = self.kv_cache_dtype
-            if is_quantized_kv_cache(cache_dtype):
+            if isinstance(cache_dtype, str) and is_quantized_kv_cache(cache_dtype):
                 qkv_dtype = current_platform.fp8_dtype()
             else:
                 qkv_dtype = self.kv_cache_dtype
@@ -754,7 +756,7 @@ class FlashAttentionImpl(AttentionImpl):
             )
         key_cache, value_cache = fixed_k, fixed_v
 
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if isinstance(self.kv_cache_dtype, str) and is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
@@ -1009,7 +1011,7 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         # For encoder attention, process FP8 quantization if needed
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if isinstance(self.kv_cache_dtype, str) and is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
