@@ -5,7 +5,7 @@
 #   Drafter:   z-lab DFlash N=5 (block-diffusion, BF16 KV in independent pool)
 #   KV:        int8_per_token_head (target) + bfloat16 (drafter — independent pools)
 #   Vision:    yes
-#   Max ctx:   262K
+#   Max ctx:   262K (399K KV cache capacity at 0.95 util)
 #   Genesis:   none — DFlash drafter handles spec-decode independently
 #   Status:    🧪 Experimental
 #   Caveats:   Boots only with vLLM PR #42102 vendored overlay. INT8 PTH + DFlash

@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -983,17 +984,50 @@ def get_max_concurrency_for_kv_cache_config(
     """
     Get the maximum concurrency for the given KV cache configuration.
     """
-    num_layer_per_group = max(
-        len(group.layer_names) for group in kv_cache_config.kv_cache_groups
-    )
-    max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
-        vllm_config, (group.kv_cache_spec for group in kv_cache_config.kv_cache_groups)
-    )
-    memory_per_block = (
-        kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-        * num_layer_per_group
-    )
-    num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
+    # Check if any group has a different number of layers from the max
+    # (DFlash: shared groups have 16 layers, drafter has 5).
+    # The upstream formula (num_layer_per_group × sum / uniform_page) assumes
+    # all groups share the same structure, which overcounts for mixed groups.
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+    group_sizes = [len(g.layer_names) for g in kv_cache_config.kv_cache_groups]
+    max_group_size = max(group_sizes) if group_sizes else 0
+    needs_per_layer_fix = len(group_sizes) > 1 and max_group_size != min(group_sizes)
+
+    if needs_per_layer_fix:
+        # Mixed group sizes: compute per-layer block requirements and take max.
+        # Each layer needs cdiv(max_mem_for_layer, page_size) blocks.
+        # The pool gives all layers the same num_blocks, so the bottleneck
+        # is the layer that needs the most blocks.
+        max_blocks_per_layer = 0
+        for group in kv_cache_config.kv_cache_groups:
+            spec = group.kv_cache_spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                for layer_spec in spec.kv_cache_specs.values():
+                    blocks = cdiv(
+                        layer_spec.max_memory_usage_bytes(vllm_config),
+                        layer_spec.page_size_bytes,
+                    )
+                    max_blocks_per_layer = max(max_blocks_per_layer, blocks)
+            else:
+                blocks = cdiv(
+                    spec.max_memory_usage_bytes(vllm_config),
+                    spec.page_size_bytes,
+                )
+                max_blocks_per_layer = max(max_blocks_per_layer, blocks)
+        num_block_per_request = max_blocks_per_layer
+    else:
+        # Uniform groups: use the original formula.
+        num_layer_per_group = max_group_size
+        max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
+            vllm_config,
+            (group.kv_cache_spec
+             for group in kv_cache_config.kv_cache_groups),
+        )
+        memory_per_block = (
+            kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
+            * num_layer_per_group)
+        num_block_per_request = cdiv(max_memory_usage_per_request,
+                                     memory_per_block)
     max_concurrency = kv_cache_config.num_blocks / num_block_per_request
     return max_concurrency
 
@@ -1816,7 +1850,10 @@ def get_kv_cache_groups(
         # Target specs: unify page sizes and group normally
         shared_specs = unify_kv_cache_spec_page_size(shared_specs)
         groups = _get_kv_cache_groups_uniform_page_size(shared_specs)
-        # Drafter specs: unify among themselves and create ONE group
+        # Drafter specs: unify page sizes among themselves.
+        # Drafter has small geometry (block_size=64, 4 kv_heads, head=128)
+        # so BF16 pages are only ~131 KB — negligible overhead vs target's
+        # 1.66 MB INT8-PTH pages.
         isolated_specs = unify_kv_cache_spec_page_size(isolated_specs)
         drafter_groups = create_kv_cache_group_specs(
             isolated_specs, [list(isolated_specs.keys())]
