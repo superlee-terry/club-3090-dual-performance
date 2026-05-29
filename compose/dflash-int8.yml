@@ -15,8 +15,7 @@
 # Self-contained compose — all paths relative to docker/ root.
 # DFlash + INT8 PTH KV long-context variant of compose/dflash.yml.
 #
-# Expected TPS: ~70-80 narr / ~110-130 code @ 262K ctx on 2x RTX 3090 PCIe.
-# (Estimates based on Gemma 4 DFlash+INT8 results: 87/146 at 262K)
+# Expected TPS: ~93 narr / ~154 code (3w+5m, 2026-05-29, 2× RTX 3090 PCIe)
 #
 # Prerequisites:
 #   1. Edit .env (copy from .env.example)
