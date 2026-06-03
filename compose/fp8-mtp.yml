@@ -1,0 +1,149 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B (Lorbus AutoRound INT4 + BF16 mtp.fc preserved)
+#   Topology:  Dual 3090 PCIe (TP=2, no NVLink)
+#   Drafter:   MTP n=3 (built-in, co-trained speculative head)
+#   KV:        fp8_e5m2 (1 byte/token, FLASH_ATTN native)
+#   Vision:    yes
+#   Max ctx:   262K (237K single-prompt verified in catalog)
+#   Genesis:   none — intentionally Genesis-free (isolation control + fallback)
+#   Status:    🧪 Experimental
+#   Best for:  General-purpose dual-card vision + tools + long-ctx + MTP spec-decode
+# ---------------------------------------------------------------------------
+# Self-contained compose — all paths relative to docker/ root.
+#
+# Expected TPS: ~69 narr / ~89 code (AL ~3.4, 262K ctx, 2× RTX 3090 PCIe).
+#
+# This fills a gap in docker/compose/: the 27B dense model had DFlash variants
+# (dflash.yml, dflash-int8.yml) and a MoE MTP variant (moe-awq-mtp.yml), but no
+# dense-model MTP compose. The catalog equivalent at
+# models/qwen3.6-27b/vllm/compose/dual/autoround-int4/fp8-mtp.yml is validated
+# as ✅ Production.
+#
+# Why MTP + FP8 KV on Ampere:
+#   - FP8_e5m2 is accepted by FLASH_ATTN (no TRITON_ATTN fallback — unlike INT8
+#     PTH which forces TRITON_ATTN and loses ~20-30% kernel speed).
+#   - MTP co-trained head tolerates KV quantization noise (acceptance drops only
+#     ~1-3% with FP8 KV, vs ~15-25% with INT8 PTH on DFlash external drafter).
+#   - --enable-prefix-caching works with MTP (DFlash requires --no-enable-prefix-
+#     caching due to vllm #38182 interaction).
+#   - Zero vendored overlays needed — MTP and FP8 KV are both upstream-native.
+#
+# Comparison with sibling docker/compose/ variants:
+#
+#   File               Draft   KV       Prefix-cache  Backend       Ctx   Narr TPS
+#   fp8-mtp.yml (this) MTP-3   FP8      ✅ ON          FLASH_ATTN    262K  ~69
+#   dflash.yml          DFlash  BF16    ❌ OFF         FLASH_ATTN    185K  ~82
+#   dflash-int8.yml    DFlash  INT8    ❌ OFF         TRITON_ATTN   262K  ~93*
+#   moe-awq-mtp.yml    MTP-3   FP16     ❌ OFF         FLASH_ATTN    200K  ~179
+#
+#   * dflash-int8.yml TPS looks higher but TRITON_ATTN overhead masks the KV
+#     savings; actual wall-clock advantage varies by batch size.
+#
+# Prerequisites:
+#   1. Edit .env (copy from .env.example)
+#   2. bash scripts/download.sh   (downloads main model — no draft model needed)
+#   3. docker compose -f compose/fp8-mtp.yml up -d
+# ===========================================================================
+
+services:
+  vllm-qwen36-27b-fp8-mtp:
+    image: ${FP8_MTP_IMAGE:-vllm/vllm-openai:v0.21.0}
+    container_name: "${FP8_MTP_CONTAINER:-vllm-qwen36-27b-fp8-mtp}"
+    restart: "no"
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${PORT:-11434}:8000"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      # --- Model weights ---
+      - ../models:/root/.cache/huggingface
+      # --- JIT compile caches ---
+      - ../cache/torch_compile_fp8_mtp:/root/.cache/vllm/torch_compile_cache
+      - ../cache/triton_fp8_mtp:/root/.triton/cache
+      # --- Patches ---
+      # Fixed chat template (froggeric — 7 bug fixes)
+      - ../patches/chat-template/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+      # NVLink auto-detection
+      - ../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPUS:-all}
+      - CUDA_VISIBLE_DEVICES=1,0
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=true
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - bash
+      - -c
+      - |
+        pip install pytest -q 2>/dev/null
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@"
+        else
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@"
+        fi
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/qwen3.6-27b/autoround-int4
+      - --served-model-name
+      - "${MODEL_ALIAS:-qwen3.6-27b-autoround}"
+      - --quantization
+      - auto_round
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      - --pipeline-parallel-size
+      - "${PP:-1}"
+      # --- KV: FP8_e5m2 (FLASH_ATTN native on Ampere SM 8.6) ---
+      - --kv-cache-dtype
+      - "${FP8_MTP_KV_DTYPE:-fp8_e5m2}"
+      - --max-model-len
+      - "${FP8_MTP_MAX_MODEL_LEN:-262144}"
+      - --gpu-memory-utilization
+      - "${FP8_MTP_GPU_UTIL:-0.92}"
+      - --max-num-seqs
+      - "2"
+      - --max-num-batched-tokens
+      - "8192"
+      - --trust-remote-code
+      - --chat-template
+      - /etc/qwen-froggeric-chat-template.jinja
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": ${ENABLE_THINKING:-false}, "preserve_thinking": true}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      # MTP + prefix-caching — both ON (MTP doesn't conflict with prefix cache,
+      # unlike DFlash which requires --no-enable-prefix-caching due to vllm #38182)
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":${FP8_MTP_MTP_TOKENS:-3}}'
+      - --override-generation-config
+      - '{"temperature":${TEMP:-0.6},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

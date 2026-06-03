@@ -1,0 +1,150 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Qwen3.6-27B Abliterated (shawnw3i AWQ mixed-precision + MTP, ~19 GB)
+#   Topology:  Dual 3090 PCIe (TP=2, no NVLink)
+#   Drafter:   MTP n=3 (embedded via model_extra_tensors.safetensors)
+#   KV:        fp8_e5m2
+#   Vision:    yes (--mm-encoder-tp-mode data)
+#   Max ctx:   262K
+#   Genesis:   N/A — Genesis is Qwen3-Next-specific
+#   Status:    🧪 Experimental
+#   Best for:  Abliterated dual-card vision + tools + long-ctx + MTP spec-decode
+# ---------------------------------------------------------------------------
+# Self-contained compose — all paths relative to docker/ root.
+#
+# Based on Ruashots/qwen3.6-27b-dual-3090-vllm-lxc-abliterated vllm-serve.sh.
+# Key deltas vs fp8-mtp.yml (same model family, different quant):
+#   - AWQ mixed-precision (auto-detected from quantization_config.json)
+#   - --mm-encoder-tp-mode data (vision on TP=2)
+#   - --max-num-seqs 4 (higher concurrency)
+#   - --gpu-memory-utilization 0.98 (smaller checkpoint → more KV headroom)
+#   - --max-num-batched-tokens 4096 (MTP draft scheduling)
+#   - --performance-mode interactivity
+#
+# Expected TPS (from Ruashots, dual RTX 3090 @ 250W):
+#   c=1: ~138 t/s · c=2: ~243 t/s · c=4: ~441 t/s
+#
+# Comparison with sibling docker/compose/ variants:
+#
+#   File                        Draft   Quant     KV    Prefix-cache  Ctx   C=4 TPS
+#   huihui-awq-mtp.yml (this)   MTP-3   AWQ-mix   FP8   ✅ ON        262K  ~441*
+#   fp8-mtp.yml                 MTP-3   AutoRound FP8   ✅ ON        262K  ~110
+#   dflash.yml                  DFlash  AutoRound BF16  ❌ OFF       185K  ~340
+#   moe-awq-mtp.yml             MTP-3   AWQ-INT4  FP16  ✅ ON        200K  ~264
+#
+#   * Ruashots measured; our hardware may differ. Validate with bench.sh.
+#
+# Abliteration caveat:
+#   This model has refusal training removed via Sumandora's orthogonal projection.
+#   It will respond to prompts that base Qwen3.6-27B refuses. Use accordingly.
+#
+# Prerequisites:
+#   1. Edit .env (copy from .env.example)
+#   2. Model at models/qwen3.6-27b/huihui-abliterated-awq/ (~19 GB)
+#   3. docker compose -f compose/huihui-awq-mtp.yml up -d
+# ===========================================================================
+
+services:
+  vllm-qwen36-27b-huihui-awq-mtp:
+    image: ${HUIHUI_AWQ_IMAGE:-lee21321/vllm-openai:club-3090-performance}
+    container_name: "${HUIHUI_AWQ_CONTAINER:-vllm-qwen36-27b-huihui-awq-mtp}"
+    restart: "no"
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${HUIHUI_AWQ_PORT:-11435}:8000"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      # --- Model weights ---
+      - ../models:/root/.cache/huggingface
+      # --- JIT compile caches ---
+      - ../cache/torch_compile_huihui:/root/.cache/vllm/torch_compile_cache
+      - ../cache/triton_huihui:/root/.triton/cache
+      # --- Patches ---
+      # Fixed chat template (froggeric — 7 bug fixes)
+      - ../models/qwen3.6-27b/huihui-abliterated-awq/chat_template.jinja:/etc/qwen-froggeric-chat-template.jinja:ro
+      # NVLink auto-detection
+      - ../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPUS:-all}
+      - CUDA_VISIBLE_DEVICES=1,0
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=true
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - VLLM_USE_FLASHINFER_SAMPLER=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - bash
+      - -c
+      - |
+        pip install pytest -q 2>/dev/null
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@"
+        else
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@"
+        fi
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/qwen3.6-27b/huihui-abliterated-awq
+      - --served-model-name
+      - "${HUIHUI_AWQ_MODEL_ALIAS:-huihui-qwen3.6-27b-awq}"
+      # AWQ quantization auto-detected from quantization_config.json
+      # (no explicit --quantization flag needed)
+      - --dtype
+      - float16
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      # --- KV: FP8_e5m2 (FLASH_ATTN native on Ampere SM 8.6) ---
+      - --kv-cache-dtype
+      - "${HUIHUI_AWQ_KV_DTYPE:-fp8_e5m2}"
+      - --max-model-len
+      - "${HUIHUI_AWQ_CTX:-262144}"
+      - --gpu-memory-utilization
+      - "${HUIHUI_AWQ_GPU_UTIL:-0.98}"
+      # Vision on TP=2 — splits mm-encoder across GPUs via data parallelism
+      - --mm-encoder-tp-mode
+      - data
+      - --max-num-seqs
+      - "${HUIHUI_AWQ_MAX_SEQS:-4}"
+      # MTP draft scheduling — bumped from 8192 to match Ruashots recipe
+      - --max-num-batched-tokens
+      - "${HUIHUI_AWQ_BATCH_TOKENS:-4096}"
+      - --trust-remote-code
+      - --chat-template
+      - /etc/qwen-froggeric-chat-template.jinja
+      - --reasoning-parser
+      - qwen3
+      - --default-chat-template-kwargs
+      - '{"enable_thinking": ${ENABLE_THINKING:-false}, "preserve_thinking": true}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      # MTP n=3 — embedded head in model_extra_tensors.safetensors
+      - --speculative-config
+      - '{"method":"mtp","num_speculative_tokens":${HUIHUI_AWQ_MTP_TOKENS:-3}}'
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --performance-mode
+      - interactivity
+      - --override-generation-config
+      - '{"temperature":${TEMP:-0.6},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

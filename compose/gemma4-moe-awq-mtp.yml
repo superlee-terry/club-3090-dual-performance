@@ -1,0 +1,134 @@
+# ===========================================================================
+# Profile (at-a-glance):
+#   Model:     Gemma 4 26B-A4B MoE (cyankiwi AWQ-4bit, compressed-tensors)
+#   Topology:  Dual 3090 PCIe (TP=2, no NVLink)
+#   Drafter:   MTP n=4 (google/gemma-4-26B-A4B-it-assistant, external)
+#   KV:        bf16 (auto — sidesteps Ampere fp8 dispatch issues)
+#   Vision:    off (limit-mm-per-prompt image=0 audio=0)
+#   Max ctx:   32K
+#   Genesis:   none
+#   Status:    🧪 Experimental
+#   Best for:  Peak MoE TPS with MTP-4 (~155/207 TPS narr/code @ 32K ctx)
+# ---------------------------------------------------------------------------
+# Self-contained compose — all paths relative to docker/ root.
+# Expected TPS: ~155 narr / 207 code @ 32K ctx on 2x RTX 3090 PCIe.
+#
+# Based on models/gemma-4-26b-a4b/vllm/compose/dual/awq/mtp.yml from the
+# club-3090 catalog. Key differences vs the Qwen3.6-35B-A3B MoE compose:
+#   - External MTP drafter (google assistant model, not built-in MTP head)
+#   - No --reasoning-parser / thinking kwargs (Gemma 4 ≠ Qwen thinking model)
+#   - Prefix caching ON (Gemma 4 MTP doesn't conflict with prefix cache)
+#   - --tool-call-parser gemma4 + bundled gemma4 chat template
+#   - --max-num-seqs 256 (Gemma 4 benefits from higher concurrency)
+#
+# PR #40886 overlay required — remaps compressed-tensors AWQ MoE expert
+# key patterns (_packed/_scale suffix) into FusedMoE-compatible format.
+# Without it, model load fails with KeyError on first packed expert key.
+#
+# Prerequisites:
+#   1. Edit .env (copy from .env.example)
+#   2. bash scripts/download.sh --gemma4-awq
+#   3. docker compose --env-file .env -f compose/gemma4-moe-awq-mtp.yml up -d
+# ===========================================================================
+
+services:
+  vllm-gemma4-26b-a4b-mtp:
+    image: ${GEMMA4_MTP_IMAGE:-vllm/vllm-openai:nightly-clean}
+    container_name: "${GEMMA4_MTP_CONTAINER:-vllm-gemma4-26b-a4b-mtp}"
+    restart: "no"
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${PORT:-11434}:8000"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      # --- Model weights ---
+      - ../models:/root/.cache/huggingface
+      # --- JIT compile caches ---
+      - ../cache/torch_compile:/root/.cache/vllm/torch_compile_cache
+      - ../cache/triton:/root/.triton/cache
+      # --- Patches ---
+      # vLLM PR #40886 — AWQ compressed-tensors MoE key remapping (REQUIRED).
+      # See ../patches/vllm-pr40886-awq-moe-keys/README.md.
+      - ../patches/vllm-pr40886-awq-moe-keys/install.sh:/etc/club3090/install-pr40886.sh:ro
+      # NVLink auto-detection
+      - ../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPUS:-all}
+      - CUDA_VISIBLE_DEVICES=1,0
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HUB_OFFLINE=true
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - NVLINK_MODE=${NVLINK_MODE:-auto}
+      - NCCL_CUMEM_ENABLE=0
+      - NCCL_P2P_DISABLE=1
+      - VLLM_NO_USAGE_STATS=1
+      - OMP_NUM_THREADS=1
+      - PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True,max_split_size_mb:512}
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - TRITON_CACHE_DIR=/root/.triton/cache
+    shm_size: "16gb"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        # PR #40886 overlay — AWQ compressed-tensors MoE key remapping (idempotent)
+        bash /etc/club3090/install-pr40886.sh
+        pip install pytest -q 2>/dev/null
+        # NVLink auto-detection
+        source /etc/club3090/detect_nvlink.sh
+        if [ "$${_NVLINK_ENABLED:-0}" = "1" ]; then
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} "$$@"
+        else
+          exec vllm serve $${VLLM_ENFORCE_EAGER:+--enforce-eager} --disable-custom-all-reduce "$$@"
+        fi
+      - --
+    command:
+      - --model
+      - /root/.cache/huggingface/gemma-4-26b-a4b-awq-4bit
+      - --served-model-name
+      - "${GEMMA4_MTP_MODEL_ALIAS:-gemma-4-26b-a4b-awq}"
+      - --tensor-parallel-size
+      - "${TP:-2}"
+      - --max-model-len
+      - "${GEMMA4_MTP_CTX:-32768}"
+      - --gpu-memory-utilization
+      - "${GEMMA4_MTP_GPU_UTIL:-0.92}"
+      - --max-num-seqs
+      - "2"
+      # MTP needs more slots to schedule draft tokens
+      - --max-num-batched-tokens
+      - "4096"
+      - --limit-mm-per-prompt
+      - '{"image":0,"audio":0}'
+      - --kv-cache-dtype
+      - auto
+      - --reasoning-parser
+      - gemma4
+      - --trust-remote-code
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - gemma4
+      - --chat-template
+      - /vllm-workspace/examples/tool_chat_template_gemma4.jinja
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      # External MTP assistant drafter — n=4 per gemma-26b-it-assistant DrafterProfile.
+      # Gemma 4 26B-A4B doesn't ship a built-in MTP head; Google provides an external
+      # assistant model (google/gemma-4-26B-A4B-it-assistant, ~0.97 GB BF16).
+      - --speculative-config
+      - '{"model":"/root/.cache/huggingface/gemma-4-26b-a4b-it-assistant","num_speculative_tokens":${GEMMA4_MTP_MTP_TOKENS:-4}}'
+      - --override-generation-config
+      - '{"temperature":${TEMP:-0.6},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
