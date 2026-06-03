@@ -7,13 +7,19 @@
 #   bash scripts/start.sh start                 # same as above
 #   bash scripts/start.sh start dflash          # start vLLM DFlash (FP16 KV, 185K ctx)
 #   bash scripts/start.sh start dflash-int8     # start vLLM DFlash + INT8 PTH KV (262K ctx)
+#   bash scripts/start.sh start fp8-mtp         # start vLLM 27B Dense + MTP-3 + FP8 KV (262K ctx)
 #   bash scripts/start.sh start moe             # start llama.cpp MoE
-#   bash scripts/start.sh start moe-mtp         # start vLLM MoE AWQ + MTP-3
+#   bash scripts/start.sh start moe-mtp         # start vLLM Qwen MoE AWQ + MTP-3
+#   bash scripts/start.sh start gemma4-mtp      # start vLLM Gemma4 MoE AWQ + MTP-4
+#   bash scripts/start.sh start huihui-awq-mtp  # start vLLM Huihui Abliterated AWQ + MTP-3
 #   bash scripts/start.sh stop                  # stop default (dflash)
 #   bash scripts/start.sh stop dflash           # stop vLLM DFlash
 #   bash scripts/start.sh stop dflash-int8      # stop vLLM DFlash + INT8
+#   bash scripts/start.sh stop fp8-mtp          # stop vLLM 27B Dense + MTP-3 + FP8 KV
 #   bash scripts/start.sh stop moe              # stop llama.cpp MoE
-#   bash scripts/start.sh stop moe-mtp          # stop vLLM MoE AWQ + MTP-3
+#   bash scripts/start.sh stop moe-mtp          # stop vLLM Qwen MoE AWQ + MTP-3
+#   bash scripts/start.sh stop gemma4-mtp       # stop vLLM Gemma4 MoE AWQ + MTP-4
+#   bash scripts/start.sh stop huihui-awq-mtp   # stop vLLM Huihui Abliterated AWQ + MTP-3
 #   bash scripts/start.sh restart [service]     # stop then start
 #   bash scripts/start.sh status                # show all services
 #   bash scripts/start.sh logs [service]        # follow logs
@@ -35,32 +41,47 @@ cd "$DOCKER_ROOT"
 declare -A SVC_COMPOSE=(
   [dflash]="compose/dflash.yml"
   [dflash-int8]="compose/dflash-int8.yml"
+  [fp8-mtp]="compose/fp8-mtp.yml"
   [moe]="compose/moe-llamacpp.yml"
   [moe-mtp]="compose/moe-awq-mtp.yml"
+  [gemma4-mtp]="compose/gemma4-moe-awq-mtp.yml"
+  [huihui-awq-mtp]="compose/huihui-awq-mtp.yml"
 )
 declare -A SVC_CONTAINER=(
   [dflash]="${CONTAINER_NAME:-vllm-qwen36-27b-dflash}"
   [dflash-int8]="${DFLASH_INT8_CONTAINER:-vllm-qwen36-27b-dflash-int8}"
+  [fp8-mtp]="${FP8_MTP_CONTAINER:-vllm-qwen36-27b-fp8-mtp}"
   [moe]="${MOE_CONTAINER:-ik-llama-moe}"
   [moe-mtp]="${MOE_AWQ_CONTAINER:-vllm-qwen36-35b-a3b-mtp}"
+  [gemma4-mtp]="${GEMMA4_MTP_CONTAINER:-vllm-gemma4-26b-a4b-mtp}"
+  [huihui-awq-mtp]="${HUIHUI_AWQ_CONTAINER:-vllm-qwen36-27b-huihui-awq-mtp}"
 )
 declare -A SVC_PORT=(
   [dflash]="${PORT:-11434}"
-  [dflash-int8]="${DFLASH_INT8_PORT:-11434}"
-  [moe]="${MOE_PORT:-11435}"
-  [moe-mtp]="${MOE_AWQ_PORT:-11436}"
+  [dflash-int8]="${PORT:-11434}"
+  [fp8-mtp]="${PORT:-11434}"
+  [moe]="${PORT:-11434}"
+  [moe-mtp]="${PORT:-11434}"
+  [gemma4-mtp]="${PORT:-11434}"
+  [huihui-awq-mtp]="${HUIHUI_AWQ_PORT:-11434}"
 )
 declare -A SVC_MODEL=(
   [dflash]="${MODEL_ALIAS:-qwen3.6-27b-autoround}"
   [dflash-int8]="${MODEL_ALIAS:-qwen3.6-27b-autoround}"
+  [fp8-mtp]="${MODEL_ALIAS:-qwen3.6-27b-autoround}"
   [moe]="${MOE_CONTAINER:-ik-llama-moe}"
   [moe-mtp]="${MOE_AWQ_MODEL_ALIAS:-qwen3.6-35b-a3b-awq}"
+  [gemma4-mtp]="${GEMMA4_MTP_MODEL_ALIAS:-gemma-4-26b-a4b-awq}"
+  [huihui-awq-mtp]="${HUIHUI_AWQ_MODEL_ALIAS:-huihui-qwen3.6-27b-awq}"
 )
 declare -A SVC_IMAGE=(
   [dflash]="${VLLM_IMAGE:-vllm/vllm-openai:nightly}"
   [dflash-int8]="${VLLM_IMAGE:-vllm/vllm-openai:nightly}"
+  [fp8-mtp]="${FP8_MTP_IMAGE:-vllm/vllm-openai:v0.21.0}"
   [moe]="${MOE_IMAGE:-ghcr.io/ikawrakow/ik-llama-cpp:cu13-server}"
   [moe-mtp]="${MOE_AWQ_IMAGE:-vllm/vllm-openai:nightly}"
+  [gemma4-mtp]="${GEMMA4_MTP_IMAGE:-vllm/vllm-openai:nightly-clean}"
+  [huihui-awq-mtp]="${HUIHUI_AWQ_IMAGE:-lee21321/vllm-openai:club-3090-performance}"
 )
 
 DEFAULT_SVC="dflash"
@@ -68,8 +89,8 @@ DEFAULT_SVC="dflash"
 resolve_service() {
   local svc="${1:-$DEFAULT_SVC}"
   case "$svc" in
-    dflash|dflash-int8|moe|moe-mtp) echo "$svc" ;;
-    *) echo "ERROR: Unknown service '$svc'. Use: dflash, dflash-int8, moe, moe-mtp" >&2; exit 1 ;;
+    dflash|dflash-int8|fp8-mtp|moe|moe-mtp|gemma4-mtp|huihui-awq-mtp) echo "$svc" ;;
+    *) echo "ERROR: Unknown service '$svc'. Use: dflash, dflash-int8, fp8-mtp, moe, moe-mtp, gemma4-mtp, huihui-awq-mtp" >&2; exit 1 ;;
   esac
 }
 
@@ -82,7 +103,7 @@ service_url() {
 
 do_status() {
   echo "=== Service Status ==="
-  for svc in dflash dflash-int8 moe moe-mtp; do
+  for svc in dflash dflash-int8 fp8-mtp moe moe-mtp gemma4-mtp huihui-awq-mtp; do
     local container="${SVC_CONTAINER[$svc]}"
     local url="$(service_url "$svc")"
     local model="${SVC_MODEL[$svc]}"
@@ -168,6 +189,14 @@ do_start() {
         echo "  DFlash+INT8 overlay OK"
       fi
     fi
+  elif [ "$svc" = "fp8-mtp" ]; then
+    local main_dir="${MODEL_DIR:-./models}/qwen3.6-27b/autoround-int4"
+    if [ ! -f "$main_dir/config.json" ] || [ "$(ls "$main_dir"/*.safetensors 2>/dev/null | wc -l)" -eq 0 ]; then
+      echo "ERROR: Main model not found at $main_dir"
+      echo "  Run: bash scripts/download.sh"
+      exit 1
+    fi
+    echo "  Main model OK (no draft model needed — MTP is built-in)"
   elif [ "$svc" = "moe" ]; then
     local moe_file="${MODEL_DIR:-./models}/qwen3.6-35b-a3b/apex-quality/Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf"
     if [ ! -f "$moe_file" ]; then
@@ -184,6 +213,41 @@ do_start() {
       exit 1
     fi
     echo "  MoE AWQ-INT4 OK ($(du -sh "$moe_awq_dir" | awk '{print $1}'))"
+  elif [ "$svc" = "gemma4-mtp" ]; then
+    local gemma4_awq_dir="${MODEL_DIR:-./models}/gemma-4-26b-a4b-awq-4bit"
+    local gemma4_asst_dir="${MODEL_DIR:-./models}/gemma-4-26b-a4b-it-assistant"
+    if [ ! -f "$gemma4_awq_dir/config.json" ] || [ "$(ls "$gemma4_awq_dir"/*.safetensors 2>/dev/null | wc -l)" -eq 0 ]; then
+      echo "ERROR: Gemma 4 AWQ-4bit not found at $gemma4_awq_dir"
+      echo "  Run: bash scripts/download.sh --gemma4-awq"
+      exit 1
+    fi
+    echo "  Gemma 4 AWQ-4bit OK ($(du -sh "$gemma4_awq_dir" | awk '{print $1}'))"
+    if [ ! -f "$gemma4_asst_dir/config.json" ] || [ "$(ls "$gemma4_asst_dir"/*.safetensors 2>/dev/null | wc -l)" -eq 0 ]; then
+      echo "ERROR: Gemma 4 MTP assistant not found at $gemma4_asst_dir"
+      echo "  Run: bash scripts/download.sh --gemma4-awq"
+      exit 1
+    fi
+    echo "  Gemma 4 MTP assistant OK ($(du -sh "$gemma4_asst_dir" | awk '{print $1}'))"
+    local patch_dir="./patches/vllm-pr40886-awq-moe-keys"
+    if [ ! -f "$patch_dir/install.sh" ]; then
+      echo "WARNING: PR #40886 patch not found at $patch_dir"
+      echo "  The compose will fail without the AWQ MoE key remapping patch."
+    else
+      echo "  PR #40886 patch OK"
+    fi
+  elif [ "$svc" = "huihui-awq-mtp" ]; then
+    local huihui_dir="${MODEL_DIR:-./models}/qwen3.6-27b/huihui-abliterated-awq"
+    if [ ! -f "$huihui_dir/config.json" ] || [ "$(ls "$huihui_dir"/*.safetensors 2>/dev/null | wc -l)" -eq 0 ]; then
+      echo "ERROR: Huihui Abliterated AWQ model not found at $huihui_dir"
+      echo "  Download: hf download shawnw3i/Huihui-Qwen3.6-27B-abliterated-AWQ-MTP --local-dir $huihui_dir"
+      exit 1
+    fi
+    echo "  Huihui Abliterated AWQ OK ($(du -sh "$huihui_dir" | awk '{print $1}'))"
+    if [ ! -f "$huihui_dir/model_extra_tensors.safetensors" ]; then
+      echo "WARNING: model_extra_tensors.safetensors not found — MTP will not load"
+    else
+      echo "  MTP extra tensors OK"
+    fi
   fi
 
   # 3. Check GPU
@@ -274,17 +338,20 @@ case "$ACTION" in
     echo "Usage: bash scripts/start.sh {start|stop|restart|status|logs} [service]"
     echo ""
     echo "Commands:"
-    echo "  start [dflash|dflash-int8|moe|moe-mtp]  Start service with preflight check"
-    echo "  stop [dflash|dflash-int8|moe|moe-mtp]   Stop service"
-    echo "  restart [service]                        Stop then start"
-    echo "  status                                   Show all services"
-    echo "  logs [service]                           Follow container logs"
+    echo "  start [dflash|dflash-int8|fp8-mtp|moe|moe-mtp|gemma4-mtp|huihui-awq-mtp]  Start service with preflight check"
+    echo "  stop [dflash|dflash-int8|fp8-mtp|moe|moe-mtp|gemma4-mtp|huihui-awq-mtp]   Stop service"
+    echo "  restart [service]                                     Stop then start"
+    echo "  status                                                Show all services"
+    echo "  logs [service]                                         Follow container logs"
     echo ""
     echo "Services:"
     echo "  dflash       Qwen3.6-27B vLLM DFlash (FP16 KV, 185K ctx) [default]"
     echo "  dflash-int8  Qwen3.6-27B vLLM DFlash + INT8 PTH KV (262K ctx)"
+    echo "  fp8-mtp      Qwen3.6-27B vLLM MTP-3 + FP8 KV (262K ctx)"
     echo "  moe          Qwen3.6-35B-A3B llama.cpp MoE"
     echo "  moe-mtp      Qwen3.6-35B-A3B vLLM AWQ + MTP-3"
+    echo "  gemma4-mtp   Gemma 4 26B-A4B vLLM AWQ + MTP-4"
+    echo "  huihui-awq-mtp  Qwen3.6-27B Abliterated AWQ + MTP-3 (262K ctx)"
     exit 1
     ;;
 esac

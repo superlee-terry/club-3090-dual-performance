@@ -28,7 +28,7 @@ services:
     container_name: "${MOE_CONTAINER:-ik-llama-moe}"
     restart: "no"
     ports:
-      - "${BIND_HOST:-0.0.0.0}:${MOE_PORT:-11435}:8080"
+      - "${BIND_HOST:-0.0.0.0}:${PORT:-11434}:8080"
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - ../models:/models:ro

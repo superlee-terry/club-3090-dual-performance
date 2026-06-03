@@ -25,7 +25,7 @@ services:
     container_name: "${CONTAINER_NAME:-vllm-qwen36-27b-dflash}"
     restart: "no"
     ports:
-      - "${BIND_HOST:-0.0.0.0}:${PORT:-8012}:8000"
+      - "${BIND_HOST:-0.0.0.0}:${PORT:-11434}:8000"
     volumes:
       - /etc/localtime:/etc/localtime:ro
       # --- Model weights ---
@@ -49,6 +49,8 @@ services:
       - ../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=${GPUS:-all}
+      - CUDA_VISIBLE_DEVICES=1,0
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - HF_HUB_OFFLINE=true
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -102,16 +104,16 @@ services:
       - --gpu-memory-utilization
       - "${GPU_MEMORY_UTILIZATION:-0.95}"
       - --max-num-seqs
-      - "1"
+      - "2"
       - --max-num-batched-tokens
-      - "8192"
+      - "4096"
       - --trust-remote-code
       - --chat-template
       - /etc/qwen-froggeric-chat-template.jinja
       - --reasoning-parser
       - qwen3
       - --default-chat-template-kwargs
-      - '{"enable_thinking": ${ENABLE_THINKING:-false}}'
+      - '{"enable_thinking": ${ENABLE_THINKING:-false}, "preserve_thinking": true}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - qwen3_coder

@@ -30,7 +30,7 @@ services:
     container_name: "${MOE_AWQ_CONTAINER:-vllm-qwen36-35b-a3b-mtp}"
     restart: "no"
     ports:
-      - "${BIND_HOST:-0.0.0.0}:${MOE_AWQ_PORT:-11436}:8000"
+      - "${BIND_HOST:-0.0.0.0}:${PORT:-11434}:8000"
     volumes:
       - /etc/localtime:/etc/localtime:ro
       # --- Model weights ---
@@ -42,11 +42,13 @@ services:
       # cudagraph tolist fix (needed for TurboQuant KV path; harmless otherwise)
       - ../patches/tolist-cudagraph/patch_tolist_cudagraph.py:/patches/patch_tolist_cudagraph.py:ro
       # Fixed chat template (7 bug fixes)
-      - ../patches/chat-template/chat_template.jinja:/patches/templates/qwen3.6-enhanced.jinja:ro
+      - ../models/qwen3.6-35b-a3b-awq-int4/chat_template.jinja:/patches/templates/qwen3.6-enhanced.jinja:ro
       # NVLink auto-detection
       - ../scripts/detect_nvlink.sh:/etc/club3090/detect_nvlink.sh:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=${GPUS:-all}
+      - CUDA_VISIBLE_DEVICES=1,0
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - HF_HUB_OFFLINE=true
       - VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -104,7 +106,7 @@ services:
       - --gpu-memory-utilization
       - "${MOE_AWQ_GPU_UTIL:-0.95}"
       - --max-num-seqs
-      - "1"
+      - "2"
       # Bumped to 4096 — MTP needs more slots to schedule draft tokens
       - --max-num-batched-tokens
       - "4096"
@@ -114,7 +116,7 @@ services:
       - --reasoning-parser
       - qwen3
       - --default-chat-template-kwargs
-      - '{"enable_thinking": false}'
+      - '{"enable_thinking": true, "preserve_thinking": true}'
       - --enable-auto-tool-choice
       - --tool-call-parser
       - qwen3_coder
@@ -126,10 +128,11 @@ services:
       #   k=4: +15/+85/+27 %  (narrative regresses, code keeps gaining)
       - --speculative-config
       - '{"method":"mtp","num_speculative_tokens":${MOE_AWQ_MTP_TOKENS:-3}}'
-      - --no-enable-prefix-caching
+#      - --enable-prefix-caching
+      - --enable-prefix-caching
       - --enable-chunked-prefill
-      - --kv-cache-dtype
-      - int8_per_token_head
+#      - --kv-cache-dtype
+#      - int8_per_token_head
       - --override-generation-config
       - '{"temperature":${TEMP:-0.6},"top_p":${TOP_P:-0.95},"top_k":${TOP_K:-20},"min_p":${MIN_P:-0.0},"repetition_penalty":${REPEAT_PENALTY:-1.0}}'
       - --host

@@ -11,7 +11,8 @@
 #   bash scripts/download.sh --main-only  # skip DFlash draft and MoE
 #   bash scripts/download.sh --moe        # download MoE GGUF only
 #   bash scripts/download.sh --moe-awq    # download MoE AWQ-INT4 only
-#   bash scripts/download.sh --all        # download everything (main + DFlash + MoE + MoE AWQ)
+#   bash scripts/download.sh --gemma4-awq # download Gemma 4 MoE AWQ + MTP assistant
+#   bash scripts/download.sh --all        # download everything (main + DFlash + MoE + MoE AWQ + Gemma4 MoE)
 #   bash scripts/download.sh --source hf  # force HuggingFace only
 #   bash scripts/download.sh --source ms  # force ModelScope only
 #   MODEL_DIR=/data/models bash scripts/download.sh
@@ -48,23 +49,31 @@ MOE_FILE="Qwen3.6-35B-A3B-APEX-MTP-I-Quality.gguf"
 # MoE AWQ: vLLM AWQ-INT4 for Qwen3.6-35B-A3B
 HF_MOE_AWQ_REPO="cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit"
 
+# Gemma 4 26B-A4B MoE AWQ + MTP assistant
+HF_GEMMA4_AWQ_REPO="cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit"
+HF_GEMMA4_ASST_REPO="google/gemma-4-26B-A4B-it-assistant"
+
 MAIN_DIR="$MODEL_DIR/qwen3.6-27b/autoround-int4"
 DFLASH_DIR="$MODEL_DIR/qwen3.6-27b/dflash"
 MOE_DIR="$MODEL_DIR/qwen3.6-35b-a3b/apex-quality"
 MOE_AWQ_DIR="$MODEL_DIR/qwen3.6-35b-a3b-awq-int4"
+GEMMA4_AWQ_DIR="$MODEL_DIR/gemma-4-26b-a4b-awq-4bit"
+GEMMA4_ASST_DIR="$MODEL_DIR/gemma-4-26b-a4b-it-assistant"
 
 SKIP_DFLASH=""
 DOWNLOAD_MOE=""
 DOWNLOAD_MOE_AWQ=""
+DOWNLOAD_GEMMA4_AWQ=""
 SOURCE="auto"  # auto | ms | hf
 
 # --- Parse args ---
 while [ $# -gt 0 ]; do
   case "$1" in
-    --main-only) SKIP_DFLASH=1 ;;
-    --moe)       DOWNLOAD_MOE=1 ;;
-    --moe-awq)   DOWNLOAD_MOE_AWQ=1 ;;
-    --all)       DOWNLOAD_MOE=1; DOWNLOAD_MOE_AWQ=1 ;;
+    --main-only)    SKIP_DFLASH=1 ;;
+    --moe)          DOWNLOAD_MOE=1 ;;
+    --moe-awq)      DOWNLOAD_MOE_AWQ=1 ;;
+    --gemma4-awq)   DOWNLOAD_GEMMA4_AWQ=1 ;;
+    --all)          DOWNLOAD_MOE=1; DOWNLOAD_MOE_AWQ=1; DOWNLOAD_GEMMA4_AWQ=1 ;;
     --source)    shift; SOURCE="${1:-auto}" ;;
   esac
   shift
@@ -154,7 +163,7 @@ if [ "$has_ms" = "true" ]; then echo "  SDK: modelscope ✓"; fi
 if [ "$has_hf" = "true" ]; then echo "  SDK: huggingface_hub ✓"; fi
 echo "  Source: $SOURCE"
 
-mkdir -p "$MAIN_DIR" "$DFLASH_DIR" "$MOE_DIR" "$MOE_AWQ_DIR"
+mkdir -p "$MAIN_DIR" "$DFLASH_DIR" "$MOE_DIR" "$MOE_AWQ_DIR" "$GEMMA4_AWQ_DIR" "$GEMMA4_ASST_DIR"
 
 # --- Download main model ---
 echo ""
@@ -222,6 +231,17 @@ if [ -n "$DOWNLOAD_MOE_AWQ" ]; then
   download_model "MoE AWQ-INT4" "" "$HF_MOE_AWQ_REPO" "$MOE_AWQ_DIR"
 fi
 
+# --- Download Gemma 4 MoE AWQ + MTP assistant ---
+if [ -n "$DOWNLOAD_GEMMA4_AWQ" ]; then
+  echo ""
+  echo "=== Downloading Gemma 4 MoE AWQ-4bit ==="
+  download_model "Gemma 4 AWQ-4bit" "" "$HF_GEMMA4_AWQ_REPO" "$GEMMA4_AWQ_DIR"
+
+  echo ""
+  echo "=== Downloading Gemma 4 MTP assistant ==="
+  download_model "Gemma 4 MTP assistant" "" "$HF_GEMMA4_ASST_REPO" "$GEMMA4_ASST_DIR"
+fi
+
 # --- Summary ---
 echo ""
 echo "=== Download summary ==="
@@ -237,10 +257,19 @@ if [ -f "$MOE_AWQ_DIR/config.json" ]; then
   AWQ_SIZE=$(du -sh "$MOE_AWQ_DIR" 2>/dev/null | awk '{print $1}' || echo "?")
   echo "  MoE AWQ-INT4:  $MOE_AWQ_DIR ($AWQ_SIZE)"
 fi
+if [ -f "$GEMMA4_AWQ_DIR/config.json" ]; then
+  G4AWQ_SIZE=$(du -sh "$GEMMA4_AWQ_DIR" 2>/dev/null | awk '{print $1}' || echo "?")
+  echo "  Gemma4 AWQ:    $GEMMA4_AWQ_DIR ($G4AWQ_SIZE)"
+fi
+if [ -f "$GEMMA4_ASST_DIR/config.json" ]; then
+  G4ASST_SIZE=$(du -sh "$GEMMA4_ASST_DIR" 2>/dev/null | awk '{print $1}' || echo "?")
+  echo "  Gemma4 Asst:   $GEMMA4_ASST_DIR ($G4ASST_SIZE)"
+fi
 echo ""
 echo "Next step:"
 echo "  cd $DOCKER_ROOT"
 echo "  bash scripts/start.sh start dflash       # vLLM DFlash (FP16 KV, 185K ctx)"
 echo "  bash scripts/start.sh start dflash-int8  # vLLM DFlash + INT8 PTH KV (262K ctx)"
 echo "  bash scripts/start.sh start moe          # llama.cpp MoE"
-echo "  bash scripts/start.sh start moe-mtp      # vLLM MoE AWQ + MTP-3"
+echo "  bash scripts/start.sh start moe-mtp      # vLLM Qwen MoE AWQ + MTP-3"
+echo "  bash scripts/start.sh start gemma4-mtp   # vLLM Gemma4 MoE AWQ + MTP-4"
